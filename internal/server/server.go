@@ -25,6 +25,7 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/openai"
 	"github.com/wnddd839/codebuddy-proxy/internal/opencode"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
+	"github.com/wnddd839/codebuddy-proxy/internal/scheduler"
 	"github.com/wnddd839/codebuddy-proxy/internal/sessionpin"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
 	"github.com/wnddd839/codebuddy-proxy/internal/usagejournal"
@@ -32,8 +33,9 @@ import (
 )
 
 type Server struct {
-	Svc  *gateway.Service
-	HTTP *http.Server
+	Svc       *gateway.Service
+	HTTP      *http.Server
+	Scheduler *scheduler.Service
 }
 
 func New(cfg config.Config, svc *gateway.Service) *Server {
@@ -864,6 +866,73 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		result := s.Svc.RunPoolChatTest(r.Context(), poolSite, model, gateway.RunPoolChatTestOptions{})
 		httputil.WriteJSON(w, http.StatusOK, result)
 		return
+	// ---- auto-checkin scheduler routes ----
+	case path == "/direct-admin/api/autocheckin/config" && r.Method == http.MethodGet:
+		if s.Scheduler == nil {
+			httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "scheduler not enabled"})
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"config": s.Scheduler.Config(),
+		})
+		return
+	case path == "/direct-admin/api/autocheckin/config" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
+		if s.Scheduler == nil {
+			httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "scheduler not enabled"})
+			return
+		}
+		var body struct {
+			Enabled bool   `json:"enabled"`
+			Time    string `json:"time"`
+		}
+		if err := httputil.ReadJSON(r, &body); err != nil {
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		cfg := scheduler.Config{Enabled: body.Enabled, Time: strings.TrimSpace(body.Time)}
+		if err := s.Scheduler.Update(cfg); err != nil {
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg})
+		return
+	case path == "/direct-admin/api/autocheckin/status" && r.Method == http.MethodGet:
+		if s.Scheduler == nil {
+			httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "scheduler not enabled"})
+			return
+		}
+		state := s.Scheduler.State()
+		nextRun := computeNextRun(state.Config)
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"config":       state.Config,
+			"lastRun":      state.LastRun,
+			"lastDay":      state.LastDay,
+			"lastDomestic": state.LastDomestic,
+			"lastGlobal":   state.LastGlobal,
+			"lastResult":   state.LastResult, // backward compat
+			"nextRun":      nextRun,
+			"running":      s.Scheduler.Running(),
+		})
+		return
+	case path == "/direct-admin/api/autocheckin/run" && r.Method == http.MethodPost:
+		if s.Scheduler == nil {
+			httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "scheduler not enabled"})
+			return
+		}
+		started := s.Scheduler.RunOnce()
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":      started,
+			"running": s.Scheduler.Running(),
+			"message": func() string {
+				if started {
+					return "auto-checkin started for domestic + global pool sites"
+				}
+				return "auto-checkin already in flight"
+			}(),
+		})
+		return
 	}
 
 	if strings.HasPrefix(path, "/direct-admin/api/codebuddy/accounts/") {
@@ -1206,4 +1275,36 @@ func queryTruthy(value string) bool {
 	default:
 		return false
 	}
+}
+
+// computeNextRun returns the next scheduled run time (as unix ms) for display
+// in the admin UI.  Returns 0 when disabled or time is unset.
+func computeNextRun(cfg scheduler.Config) int64 {
+	if !cfg.Enabled {
+		return 0
+	}
+	h, m, err := parseHM(cfg.Time)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next.UnixMilli()
+}
+
+// parseHM parses "HH:MM" into hour/minute — duplicated here to avoid the
+// scheduler package's test-only pad helper being exported.  The semantics
+// match scheduler.parseHM exactly.
+func parseHM(s string) (hour, minute int, err error) {
+	s = strings.TrimSpace(s)
+	if _, err := fmt.Sscanf(s, "%d:%d", &hour, &minute); err != nil {
+		return 0, 0, fmt.Errorf("expected HH:MM")
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, 0, fmt.Errorf("hour/minute out of range: %d:%d", hour, minute)
+	}
+	return hour, minute, nil
 }

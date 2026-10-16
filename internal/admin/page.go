@@ -8,7 +8,7 @@ import (
 // UIRevision is the admin console markup/script stamp. Bump it on every
 // meaningful change to PageHTML so operators can tell the rebuilt binary
 // carries the new UI (independent of the release tag injected via ldflags).
-const UIRevision = "2026.09.23-status-pills"
+const UIRevision = "2026.10.16-autocheckin"
 
 func PageHTML() string {
 	return `<!doctype html>
@@ -427,6 +427,30 @@ pre{
         <p class="checkin-hint" id="poolTestHint">对当前号池已启用账号发最小 chat，验证可用性与延迟；默认选最低倍率模型。</p>
         <pre class="checkin-detail" id="checkinRaw" hidden></pre>
         <pre class="checkin-detail" id="poolTestRaw" hidden></pre>
+
+        <!-- 自动每日签到配置 -->
+        <div style="margin-top:28px;padding-top:16px;border-top:1px solid var(--fg-10)" id="autoCheckinBlock">
+          <div class="section-head" style="border:none;padding:0;margin:0 0 12px">
+            <div>
+              <h2 style="font-size:15px;margin:0;font-family:var(--display);font-weight:400">自动每日签到</h2>
+              <p style="margin:4px 0 0;color:var(--fg-40);font-size:11.5px">到达配置时间后，自动为国内站 + 国际站全部已启用账号签到。</p>
+            </div>
+          </div>
+          <div class="field-grid" style="grid-template-columns:auto auto auto 1fr;align-items:end;gap:16px">
+            <label style="display:flex;align-items:center;gap:8px;flex-direction:row;text-transform:none;letter-spacing:0">
+              <input type="checkbox" id="autoCheckinEnabled" style="width:auto" />
+              <span style="text-transform:uppercase;font-size:11px;letter-spacing:.12em;color:var(--fg-40)">启用</span>
+            </label>
+            <label for="autoCheckinTime" style="text-transform:uppercase;font-size:11px;letter-spacing:.12em;color:var(--fg-40)">每日时间
+              <input type="time" id="autoCheckinTime" step="60" value="08:00" style="width:auto;min-width:110px" />
+            </label>
+            <div class="actions" style="margin:0">
+              <button class="primary" id="btnAutoCheckinSave" type="button">保存</button>
+              <button class="ghost" id="btnAutoCheckinRun" type="button">立即执行</button>
+            </div>
+            <div id="autoCheckinStatus" style="font-size:11.5px;color:var(--fg-40);align-self:end;line-height:1.6"></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -1625,6 +1649,82 @@ if ($('usageAccountFilter')) $('usageAccountFilter').onchange = onUsageFilterCha
 if ($('usageModelFilter')) $('usageModelFilter').onchange = onUsageFilterChange;
 if ($('btnCheckin')) $('btnCheckin').onclick = function(){ runPoolCheckin().catch(function(e){ showToast(e.message, 'error'); }); };
 if ($('btnPoolTest')) $('btnPoolTest').onclick = function(){ runPoolChatTest().catch(function(e){ showToast(e.message, 'error'); }); };
+
+/* =====================================================
+   自动每日签到 (scheduler)
+   ===================================================== */
+async function loadAutoCheckinConfig(){
+  try {
+    const data = await api('/direct-admin/api/autocheckin/status');
+    if (!data.ok) {
+      $('autoCheckinBlock').style.display = 'none';
+      return;
+    }
+    if ($('autoCheckinEnabled')) $('autoCheckinEnabled').checked = !!(data.config && data.config.enabled);
+    if ($('autoCheckinTime')) $('autoCheckinTime').value = (data.config && data.config.time) || '08:00';
+    renderAutoCheckinStatus(data);
+  } catch (e) {
+    // 404 / 后端未启用时隐藏区块，保持 UI 干净
+    if ($('autoCheckinBlock')) $('autoCheckinBlock').style.display = 'none';
+  }
+}
+function renderAutoCheckinStatus(data){
+  const box = $('autoCheckinStatus');
+  if (!box) return;
+  const cfg = data.config || {};
+  const next = data.nextRun;
+  const lastRun = data.lastRun;
+  const running = data.running;
+  const parts = [];
+  if (running) parts.push('<span class="badge on">执行中…</span>');
+  if (cfg.enabled) {
+    parts.push('下次: ' + escapeHtml(formatTime(next)));
+  } else {
+    parts.push('<span style="color:var(--fg-40)">未启用</span>');
+  }
+  if (lastRun) {
+    parts.push(' · 上次: ' + escapeHtml(formatTime(lastRun)));
+    const dom = data.lastDomestic, glo = data.lastGlobal;
+    const formatRes = function(name, r){
+      if (!r || !r.summary) return '';
+      return name + ' 成功' + (r.summary.checkedIn||0) + '/已签' + (r.summary.alreadyDone||0) + '/失败' + (r.summary.failed||0);
+    };
+    const domText = formatRes('国内', dom);
+    const gloText = formatRes('国际', glo);
+    const allText = (domText ? domText + ' · ' : '') + gloText;
+    if (allText) parts.push(' · ' + allText);
+  } else {
+    parts.push(' · 尚未执行');
+  }
+  box.innerHTML = parts.join('');
+}
+async function saveAutoCheckinConfig(){
+  const enabled = !!(($('autoCheckinEnabled') || {}).checked);
+  const time = ($('autoCheckinTime') || {}).value || '08:00';
+  try {
+    await api('/direct-admin/api/autocheckin/config', {
+      method: 'POST',
+      body: JSON.stringify({enabled: enabled, time: time}),
+    });
+    showToast('自动签到配置已保存');
+    await loadAutoCheckinConfig();
+  } catch (e) {
+    showToast('保存失败：' + (e.message || e), 'error');
+  }
+}
+async function runAutoCheckinNow(){
+  try {
+    const data = await api('/direct-admin/api/autocheckin/run', {method: 'POST'});
+    showToast(data.ok ? '已触发签到，请稍后查看结果' : (data.message || '签到已在进行中'));
+    setTimeout(loadAutoCheckinConfig, 2000);
+  } catch (e) {
+    showToast('触发失败：' + (e.message || e), 'error');
+  }
+}
+if ($('btnAutoCheckinSave')) $('btnAutoCheckinSave').onclick = function(){ saveAutoCheckinConfig(); };
+if ($('btnAutoCheckinRun')) $('btnAutoCheckinRun').onclick = function(){ runAutoCheckinNow(); };
+loadAutoCheckinConfig();
+
 $('btnModels').onclick = function(){ refreshModels().catch(function(e){ $('modelsRaw').textContent = e.message; $('modelChips').innerHTML = '<div class="empty">' + escapeHtml(e.message) + '</div>'; }); };
 $('btnStart').onclick = function(){ startOAuth().catch(function(e){ $('oauthMsg').textContent = e.message; $('oauthRaw').textContent = e.message; }); };
 $('btnPoll').onclick = function(){ pollOAuth().catch(function(e){ $('oauthMsg').textContent = e.message; $('oauthRaw').textContent = e.message; }); };

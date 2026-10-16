@@ -5,6 +5,27 @@
 
 ---
 
+## v0.5.6 · 2026-10-16 · 每日自动签到
+
+### 解决了什么
+
+管理台原本只能手动点「每日签到」，号池账号一多就得逐个点，容易漏签。
+
+### 改了什么
+
+- 新增每日自动签到：管理台可勾选开启并设置每日签到时间（`HH:MM`），到点后自动为**全部账号**签到 —— 国内站与国际站各自跑满对应号池，不局限于当前激活号池。
+- 配置持久化在 `proxy-autocheckin.json`（与账号文件同目录），重启后保留；重启时若当天目标时间已过且当天尚未跑过，会自动补跑一次。
+- 新增管理台接口：`GET/POST /direct-admin/api/autocheckin/config`、`GET /direct-admin/api/autocheckin/status`、`POST /direct-admin/api/autocheckin/run`（立即执行一次）。状态分别展示国内站 / 国际站最近一次结果。
+- 支持环境变量无界面引导：`CODEBUDDY_AUTO_CHECKIN_ENABLED`、`CODEBUDDY_AUTO_CHECKIN_TIME`（仅在没有配置文件时生效，磁盘配置优先）。
+
+### 升级注意
+
+覆盖旧二进制后重启。管理台「自动每日签到」默认关闭，需手动勾选并设置时间。账号池不用迁移。
+
+下载：https://github.com/wnddd839/buddy-proxy/releases/tag/v0.5.6
+
+---
+
 ## v0.5.5.1 · 2026-10-05 · 目录补缺不再顶掉 console 的 credits
 
 ### 感谢

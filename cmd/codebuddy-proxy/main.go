@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wnddd839/codebuddy-proxy/internal/billing"
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
 	"github.com/wnddd839/codebuddy-proxy/internal/gateway"
+	"github.com/wnddd839/codebuddy-proxy/internal/scheduler"
 	"github.com/wnddd839/codebuddy-proxy/internal/server"
 )
 
@@ -46,7 +48,30 @@ func main() {
 	}
 
 	svc := gateway.New(cfg, logger)
+
+	// auto-checkin scheduler — bound to the gateway so it can access both
+	// pool sites and the current provider / config at runtime.
+	autoCheckin, err := scheduler.Open(cfg.AccountsPath, logger, func(ctx context.Context, site string) billing.CheckinBatchResult {
+		store, storeErr := svc.Pool.Read()
+		if storeErr != nil {
+			return billing.CheckinBatchResult{PoolSite: site, OK: false, Note: storeErr.Error()}
+		}
+		return billing.RunPoolCheckin(ctx, svc.Provider, store, svc.Config(), site)
+	})
+	if err != nil {
+		logger.Warn("auto-checkin scheduler disabled", "error", err.Error())
+	} else {
+		autoCheckin.Start()
+		logger.Info("auto-checkin scheduler ready",
+			"enabled", autoCheckin.Config().Enabled,
+			"time", autoCheckin.Config().Time,
+		)
+	}
+
 	srv := server.New(cfg, svc)
+	if autoCheckin != nil {
+		srv.Scheduler = autoCheckin
+	}
 
 	printStartupBanner(cfg, generatedKey)
 	logger.Debug("codebuddy proxy starting",
@@ -73,6 +98,10 @@ func main() {
 		}
 	case sig := <-sigCh:
 		logger.Info("shutting down", "signal", sig.String())
+		if autoCheckin != nil {
+			autoCheckin.Stop()
+			logger.Info("auto-checkin scheduler stopped")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {

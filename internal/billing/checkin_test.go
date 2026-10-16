@@ -363,8 +363,13 @@ func TestRunPoolCheckinFiltersByPoolSite(t *testing.T) {
 	if len(out.Results) != 1 || out.Results[0].AccountID != "domestic-1" {
 		t.Fatalf("results=%+v", out.Results)
 	}
-	if out.Summary.Failed != 1 || out.Summary.Unsupported != 0 {
-		t.Fatalf("timeout should count as failed: %+v", out.Summary)
+	// The 1ns deadline means the account is never attempted; per design that is
+	// counted as skipped (see addUnattempted), while the batch itself is not OK.
+	if out.Summary.Skipped != 1 || out.Summary.Failed != 0 || out.Summary.Unsupported != 0 {
+		t.Fatalf("expired batch should count as skipped, not failed: %+v", out.Summary)
+	}
+	if out.OK {
+		t.Fatalf("batch with an unattempted account should not be OK: %+v", out)
 	}
 }
 
