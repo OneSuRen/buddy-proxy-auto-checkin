@@ -8,7 +8,7 @@ import (
 // UIRevision is the admin console markup/script stamp. Bump it on every
 // meaningful change to PageHTML so operators can tell the rebuilt binary
 // carries the new UI (independent of the release tag injected via ldflags).
-const UIRevision = "2026.10.16-autocheckin"
+const UIRevision = "2026.10.16-credits-sum"
 
 func PageHTML() string {
 	return `<!doctype html>
@@ -407,7 +407,7 @@ pre{
         <p class="lede">监控 OAuth 登录、账号池状态与请求健康度。</p>
         <div class="metrics">
           <div class="metric"><div class="k">登录态</div><div class="v sm" id="mLogin">未登录</div></div>
-          <div class="metric"><div class="k">Credits 余额</div><div class="v sm" id="mCredits">—</div></div>
+          <div class="metric"><div class="k">积分余额汇总</div><div class="v sm" id="mCredits">—</div></div>
           <div class="metric"><div class="k">启用账号</div><div class="v" id="mEnabled">0</div></div>
           <div class="metric"><div class="k">成功 / 失败</div><div class="v sm" id="mSF">0 / 0</div></div>
           <div class="metric"><div class="k">总 Tokens</div><div class="v sm" id="mTokens">0</div></div>
@@ -1281,15 +1281,41 @@ function paintStatus(data){
       usageByAccount[item.accountId] = item;
     });
   }
-  if (primary && primary.id && primary.hasCredentials && !usageByAccount[primary.id] && !paintStatus._usageKick) {
+  // 当前号池中已启用且有凭证（已登录）的账号，用于积分余额汇总
+  const activeAccounts = (accounts.accounts || []).filter(function(a){
+    return a && a.id && a.enabled && a.hasCredentials && normalizeSite(a.site) === poolSite;
+  });
+  // 首次加载时静默拉取全部已登录账号的余额，保证汇总值有意义
+  if (!paintStatus._usageKick) {
     paintStatus._usageKick = true;
-    fetchAccountUsage(primary.id, true).catch(function(){});
+    activeAccounts.forEach(function(a){
+      if (!usageByAccount[a.id]) {
+        fetchAccountUsage(a.id, true).catch(function(){});
+      }
+    });
   }
-  const usage = primary && usageByAccount[primary.id];
-  if (usage && usage.credits) {
-    const c = usage.credits;
-    $('mCredits').textContent = c.unlimited ? '不限量' : ((c.remaining == null ? '-' : c.remaining) + ' / ' + (c.total == null ? '-' : c.total));
-  } else if (usage && usage.error) {
+  // 汇总当前号池全部已登录账号的积分余额（remaining）
+  let totalRemaining = 0;
+  let hasUnlimited = false;
+  let counted = 0;
+  let hasError = false;
+  activeAccounts.forEach(function(a){
+    const u = usageByAccount[a.id];
+    if (!u) return;
+    if (u.error) { hasError = true; return; }
+    const c = u.credits || {};
+    if (c.unlimited) { hasUnlimited = true; return; }
+    if (c.remaining != null) {
+      totalRemaining += Number(c.remaining);
+      counted++;
+    }
+  });
+  if (hasUnlimited) {
+    $('mCredits').textContent = '不限量';
+  } else if (counted > 0) {
+    const fmt = Number.isInteger(totalRemaining) ? String(totalRemaining) : String(parseFloat(totalRemaining.toFixed(4)));
+    $('mCredits').textContent = fmt + ' 积分';
+  } else if (hasError) {
     $('mCredits').textContent = '查询失败';
   } else {
     $('mCredits').textContent = loggedIn ? '点击查余额' : '—';
